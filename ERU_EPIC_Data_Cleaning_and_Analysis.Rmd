@@ -1,0 +1,215 @@
+---
+title: "ERU EPIC Data Cleaning and Analysis"
+author: "Joy"
+date: "16 March 2016"
+output: word_document
+---
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE}
+setwd("~/Documents/ERU project")
+library(survival)
+library(xtable)
+library(Hmisc)
+library(gridBase, gridExtra)
+library(lattice)
+library(lubridate)
+library(dplyr)
+```
+
+#Order of EPIC timestamp events  
+In.Room.Time  
+Patient.Ready.Time  
+Procedure.Closing.Time  
+Procedure.End.Time  
+Ready.for.Recovery.Time  
+Out.of.Room.Time  
+In.Phase.I..PACU..Time  
+Phase.I.Care.Complete..PACU..Time  
+Out.of.Phase.I.Time  
+Procedural.Care.Complete.Time  
+
+#Sorting out useful columns  
+```{r, warning = FALSE}
+# Reading in data
+epic <- read.csv("Nov 1 thru Mar 15.csv", sep = ",")
+
+# Create an ID column
+id <- 1:nrow(epic)
+epic <- cbind(id=id, epic)
+
+# Select columns/variables that are not all empty (NA's):
+epic <- epic[,c("id", "Date", "Procedures", "Patient.Class", "Primary.An.Type", "Service", "TYPE.OF.BED", "Patient.Age.at.Case", "Log.PACU.Nurse", "ASA", "In.Room.Time", "Patient.Ready.Time", "Procedure.Closing.Time", "Procedure.End.Time", "Ready.for.Recovery.Time", "Out.of.Room.Time", "In.Phase.I..PACU..Time", "In.Phase.II.Time", "Out.of.Phase.I.Time", "Out.of.Phase.II.Time", "Phase.I.Care.Complete..PACU..Time", "Phase.II.Care.Complete.Time",  "Procedural.Care.Complete.Time")]
+
+# Some variables have lots of missing values (likely due to poor documentable/data entry) - notably: "In.Phase.II.Time" (40 levels/values present), Phase.II.Care.Complete.Time (27 levels), and "Out.of.Phase.II.Time" (40 levels)
+str(epic)
+
+# We will remove the columns with poor data entry:
+epic <- epic[, !(colnames(epic) %in% c("In.Phase.II.Time", "Phase.II.Care.Complete.Time", "Out.of.Phase.II.Time"))]
+str(epic)
+
+
+```
+
+#Viewing some factor variables:  
+```{r, warning = FALSE}
+# Number of patients
+nrow(epic)
+
+# Number of patients on each day from 1st Nov 2015 to 15th Mar 2016
+dates <- group_by(epic, Date) %>% summarise(n=n())
+barplot(dates$n)
+
+# Types of patients
+levels(epic$Patient.Class)
+
+# Types of anesthesia
+levels(epic$Primary.An.Type)
+
+# Types of Service
+levels(epic$Service)
+       
+# Types of special beds - regular care has no particular type ("")
+levels(epic$TYPE.OF.BED)
+```
+
+#Dealing with Date time  
+```{r, warning = FALSE}
+# Change timestamp columns/variables into Date-time format:
+epic[ , 11:20] <- lapply(epic[ , 11:20], function(x) strptime(as.character(x), format = "%m/%d/%Y %H:%M"))
+##epic_num <- lapply(epic[ , 11:20], function(x) as.numeric(x)) 
+
+epic$Date <- strptime(epic$Date, format = "%m/%d/%Y")
+
+#View first 20 rows of timestamp columns
+head(epic[,c(2, 11:20)], 20) 
+
+# Create day of week colume
+epic$Weekday <- wday(epic$Date, label = TRUE)
+summary(epic$Weekday)
+barplot(summary(epic$Weekday), col = rainbow(7))
+
+```
+
+#Summary background data:  
+```{r, warning = FALSE}
+# Clean patient age
+epic$Age <- lapply(epic[ , "Patient.Age.at.Case"], function(x) gsub(" yrs", "", x))
+epic$Age <- as.numeric(epic$Age)
+
+# Age distribution
+summary(epic$Age)
+
+# ASA distribution
+summary(epic$ASA)
+
+# Patient class pre-op summary: (ERU = "Post Procedure Recovery")
+sort(summary(epic$Patient.Class), decreasing = TRUE)
+
+# Service summary:
+sort(summary(epic$Service), decreasing = TRUE)
+
+# Anesthesia type summary:
+sort(summary(epic$Primary.An.Type), decreasing = TRUE)
+
+# Missing Gender and Payer type ### need to ask Chris
+```
+
+#Variables for queueing model
+
+##Need to have arrival rate, lambda, service rate, mu, and server number, c
+
+1. lambda = number of patients becoming "Ready.for.Recovery.Time" per hour  
+2. mu = 1/average_time(Out.of.Phase.I.Time - Ready.for.Recovery.Time)  
+3. c = number of PACU nurses staffing Phase I care  
+
+However, lambda, mu, and c all differ by the hour (nurse staffing are staggered by the hour)  
+
+## Questions to consider:  
+
+1. Should we perhaps build a queueing model by the hour, i.e. different lambda and mu for each hour after 8am  
+2. Maybe the goal of the gueueing model should be to figure out the optimal "c"?  
+3. Also what distribution do lambda and mu follow?   
+
+Most of the surgeries are elective though the operating time for different surgeries differ so patients starting at the same time would come out of the OR at different times. So, the distribution of lambda is likely uniform or normally distributed. The distribution of mu could be almost a constant (as most patients take similar amount of time to come out of Phase I care), normally distributed (Random variation due to staffing shortage in PACU), or exponentially distributed (some older patients may take very long to recover). We could possibly make a guess by plotting the daily distribution of lambda and mu to see the shape of the distribution, as well as comparing the mean with the variance across the different days (mean should be similar to variance if distribution is exponential).   
+
+# Calculating empiric lambda and mu values:  
+```{r, warning = FALSE}
+# Should remove the weekend days (Sat and Sun) as case load and service rate may be different (lower) on average (lower staffing and OR case load on weekends)
+epic2 <- epic[which(epic$Weekday %in% c("Mon", "Tues", "Wed", "Thurs", "Fri")),] 
+
+# Creating average arrival rate, lambda
+# lambda = number of patients becoming "Ready.for.Recovery.Time" per hour = total number of patients / total operating hours over the weekdays
+
+# But need to remove any days/rows with NA's first. We'll create new data frame for this
+epic3 <- epic2[, c("Date", "In.Room.Time", "Out.of.Room.Time")]
+nrow(epic3)
+# Check if there are any NA rows in epic3
+row.has.na <- lapply(epic3[, 2:3], function(x){sum(is.na(x))})
+row.has.na
+# Remove NA rows
+epic3 <- na.omit(epic3) 
+# Which somehow doesn't work
+
+# Calculate the total number of patients, n
+
+# This doesn't work either: n <- nrow(epic3[epic3$Out.of.Room.Time != NA & epic3$In.Room.Time != NA,])
+# So we'll minus number of rows in epic3 by 14 because we know there are 14 missing values (which I couldn't remove by subsetting)
+n <- nrow(epic3[epic3$Out.of.Room.Time != NA & epic3$In.Room.Time != NA,]) - 14
+n
+
+# Calculate the total number of operating hours, total_t
+
+# Need to group by Date first 
+dates <- as.character(unique(epic3$Date))
+length(dates)
+
+# Create function to calculate total operating hours on each day
+t_diff <- function(x){
+  t <- difftime(max(x$Out.of.Room.Time, na.rm=T), min(x$In.Room.Time, na.rm = T), units = "hours")
+  t <- as.numeric(t)
+  return(t)
+}
+
+# Use a for-loop and the t_dff function to calculate total_t operating hours over all the weekdays:
+t <- NULL
+total_t <- 0
+for(i in 1:length(dates)){
+    t[i] <- t_diff(epic[epic$Date == dates[i],])
+    if (!is.na(t[i])) {
+      total_t <- t[i] + total_t 
+    }
+}
+
+# Total operating hours over all the weekdays:
+paste(round(total_t, 4), "hours")
+
+# Calculate arrival rate, lambda = n/T_hr
+lambda <- n/total_t
+paste(round(lambda, 4), "per hour")
+
+
+# Creating average service time, inv_mu = 1/mu 
+# Back to using epic2
+
+# Create new colume for service_time for each patient/row
+epic2$service_time <- as.numeric(difftime(epic2$Out.of.Phase.I.Time, epic2$Ready.for.Recovery.Time, units = "hours"))
+
+# Average service time over all patients/row, inv_mu (hours)
+inv_mu <- mean(epic2$service_time, na.rm = TRUE)
+paste(round(inv_mu,4), "hours")
+
+# Average service rate, mu (number per hour)
+mu <- 1/inv_mu
+paste(round(mu, 4), "per hour")
+
+```
+
+# Exploratory analysis of distribution of lambda and mu
+```{r, warning = FALSE}
+# Will do this in the future
+```
+
+# Writing cleaned file back to .csv file  
+```{r, warning = FALSE}
+write.csv(epic, file = "Cleaned_EPIC_NovMar_data.csv")
+```
