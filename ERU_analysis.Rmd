@@ -1,0 +1,933 @@
+---
+title: "ERU Project - data cleaning & exploratory analysis"
+author: "Joy Wu"
+date: "16 August 2015"
+output: html_document
+---
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE}
+setwd("~/Documents/ERU project")
+library(survival)
+library(xtable)
+library(Hmisc)
+library(gridBase, gridExtra)
+library(lattice)
+library(lubridate)
+library(dplyr)
+```
+
+# Introduction:
+ERU stands for Extended Recovery Unit; a '23-hour' unit. This is a new admission category for patients who need a slightly longer overnight monitoring period post-operative but do not necessarily need to be admitted for over 24 hours. However, since the introduction of ERU admissions, the rate of actual 'on-time' discharges have been low.
+
+# Objectives of this study are:
+1. To find out the various reasons why ERU patients were discharged late or admitted inpatient on post-operative day one.
+2. Come up with a pre-operative prediction model to better assess whether a patient is likely able to be discharged on time.
+
+# Method:
+- Data source: Partner's LMR database and nursing log on ERU
+- Pre-op co-morbidities, various functional scores in pre-op nursing assessment form, OR service and payor information, summary of progress notes throughout PACU and ERU stay, as well as outpatient notes available on LMR are reviewed.
+- The main outcome is whether the patient is discharged on time, late or admitted inpatient
+- Secondary outcomes include:
+1. late minute foley placement on POD1
+2. Re-admission or ED visit within 3 days of discharge
+3. Patient stating not ready for discharge when phone followed up at 2 days.
+
+# Pre-lim Results:
+- Patients who were listed down as ERU admission pre-op from 5/5/15 to 7/16/14 are included in this study.
+- 16 Patients were excluded due to no LMR notes uploaded
+- 4 Patients were excluded because of invalid MRN
+- 1 patient was excluded because his/her operation was postponed after pre-op visit and his/her admission category was changed to inpatient post-op
+- 4 records were duplicates so are also not included
+- A total of 281 patients are included in the following analysis.
+
+# Data cleaning and rough analysis:
+The analysis is done in R. Aim to do some logistic regression eventually. Currently still waiting to clean up co-morbidity data first but here's what we have so far:
+
+```{r, echo =FALSE, message = FALSE, warning = FALSE}
+# Preparing data for analysis
+# Reading in dataset
+eru <- read.csv("ERU_sorted_data.csv", sep = ",")
+#str(eru)
+
+# De-identify dataset
+eru$ID <- 1:nrow(eru)
+eru <- select(eru, ID, ERU_outcome:education, blind_HOH:patient_not_ready4dc)
+```
+
+## Overral structure of the raw ERU dataset:
+```{r}
+str(eru)
+```
+
+```{r, echo =FALSE, message = FALSE, warning = FALSE, results='hide'}
+# Renaming levels of ERU_outcome to something more descriptive
+levels(eru$ERU_outcome)
+levels(eru$ERU_outcome)[2] <- "Late"
+levels(eru$ERU_outcome)[1] <- "On_time"
+```
+
+## Rough summary of ERU outcome: On_time, Late, or IP (admitted inpatient)
+```{r}
+# Number of patients in each category
+summary(eru$ERU_outcome)
+
+# Proportion of patients in each category
+prop.table(table(eru$ERU_outcome))
+paste(round(prop.table(table(eru$ERU_outcome))*100,2), "%")
+```
+
+```{r, , echo =FALSE, message = FALSE, warning = FALSE}
+# Seperating ueful data chunks: -- all moved to later sections
+
+# demographics:
+# demo <- select(eru, ID:education, smoker)
+# Funcational baseline:
+# fnbase <- select(eru, ERU_outcome, blind_HOH:ASA_34)
+# OR related information:
+# ORinfo <- select(eru, ID:ERU_outcome, service:OR_date)
+# Post-op timeline
+# postop_chron <- select(eru, ID:ERU_outcome, TimeoutOR_after1800, ERU_after2100, PACU_event:MDplan_after7am)
+# Reasons for late discharge
+# reasons <- select(eru, ID:ERU_outcome, Prim_reason, other_reasons, doc_ride_issue, last_minute_foley)
+# ERU discharge quality indicators
+# qualty_dc <- select(eru, ID:ERU_outcome, last_minute_foley:patient_not_ready4dc)
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='hide'}
+# Demographics, education, employment data cleaning
+# demographics:
+demo <- select(eru, ID:education, smoker)
+# Summarize demographics
+head(demo)
+str(demo)
+
+# Clean age
+summary(demo$Age)
+summary(is.na(demo$Age))
+
+# Clean genders
+levels(demo$Gender)
+levels(demo$Gender)[2] <- "F"
+summary(demo$Gender)
+demo$Gender <- as.character(demo$Gender)
+demo$Female <- NULL
+for (i in 1:nrow(demo)) {
+  if (demo$Gender[i] == "F") {
+    demo$Female[i] <- 1
+  }
+  else {
+    demo$Female[i] <- 0
+  } 
+}  
+sum(demo$Female, na.rm = T)
+summary(demo$Female)
+paste(round(mean(demo$Female, na.rm = T)*100, 2), "%", sep = "")
+
+# Clean marital status
+levels(demo$Married)
+levels(demo$Married)[3] <- NA
+demo$Married <- as.character(demo$Married)
+demo$Married <- as.integer(demo$Married)
+sum(demo$Married, na.rm = T)
+summary(demo$Married)
+paste(round(mean(demo$Married, na.rm = T)*100, 2), "%", sep = "")
+
+# Clean language
+which(is.na(demo$no_English))
+sum(demo$no_English, na.rm = T)
+summary(demo$no_English)
+paste(round(mean(demo$no_English, na.rm = T)*100, 2), "%", sep = "")
+# No missing values in language
+#demo$no_English <- as.factor(demo$no_English)
+
+# Clean smoking status
+levels(demo$smoker)
+levels(demo$smoker)[3] <- NA
+demo$smoker <- as.character(demo$smoker)
+demo$smoker <- as.integer(demo$smoker)
+sum(demo$smoker, na.rm = T)
+summary(demo$smoker)
+paste(round(mean(demo$smoker, na.rm = T)*100, 2), "%", sep = "")
+
+# Simply race data 
+levels(demo$Race)
+summary(demo$Race)
+# To White, Hispanic, Black, Asian, Other, NA
+levels(demo$Race)[9] <- "Other" #level 9: White_Native American
+# levels(demo$Race)[7] <- NA    #level 7: NULL (ie unknown)
+levels(demo$Race)[c(5, 6)] <- "Other" #levels 5, 6: Middle Eastern, Native American
+levels(demo$Race)[c(1, 2)] <- "Other"  #levels 1, 2: Arab, Asian
+summary(demo$Race)
+paste(round(prop.table(table(demo$Race))*100, 2), "%", sep = "")
+# Tease out race data
+demo$Race <- as.character(demo$Race)
+demo$White <- NULL
+demo$Hispanic <- NULL
+demo$Black <- NULL
+demo$Other <- NULL
+demo$Missing_race <- NULL
+for (i in 1:nrow(demo)) {
+if (demo$Race[i] == "White") {
+    demo$White[i] <- 1
+  }
+  else {
+    demo$White[i] <- 0
+  } 
+if (demo$Race[i] == "Black") {
+    demo$Black[i] <- 1
+  }
+  else {
+    demo$Black[i] <- 0
+  }
+if (demo$Race[i] == "Hispanic") {
+    demo$Hispanic[i] <- 1
+  }
+  else {
+    demo$Hispanic[i] <- 0
+  }
+if (demo$Race[i] == "Other") {
+    demo$Other[i] <- 1
+  }  
+  else {
+    demo$Other[i] <- 0
+  }  
+if (demo$Race[i] == "NULL") {
+    demo$Missing_race[i] <- 1
+  }  
+  else {
+    demo$Missing_race[i] <- 0
+  }
+}
+
+missing_race <- demo$Race == "NULL"
+demo$White[missing_race] <- NA
+demo$Black[missing_race] <- NA
+demo$Hispanic[missing_race] <- NA
+demo$Other[missing_race] <- NA
+
+# For employment_status, 0 = employed/student, 1 = retired, 2 = unemployed/disabled/homemaker
+# demo$employment_status <- as.factor(demo$employment_status)
+levels(demo$employment_status)
+levels(demo$employment_status)[c(3)] <- "unemployed/disabled"
+levels(demo$employment_status)[c(2)] <- "retired"
+levels(demo$employment_status)[c(1)] <- "employed"
+summary(demo$employment_status)
+paste(round(prop.table(table(demo$employment_status))*100,2),"%")
+demo$employment_status <- as.character(demo$employment_status)
+demo$employed <- NULL
+demo$retired <- NULL
+demo$unemployed <- NULL
+demo$missing_employment <- NULL
+for (i in 1:nrow(demo)) {
+  if (demo$employment_status[i] == "employed") {
+    demo$employed[i] <- 1
+  }
+  else {
+    demo$employed[i] <- 0
+  } 
+  if (demo$employment_status[i] == "retired") {
+    demo$retired[i] <- 1
+  }
+  else {
+    demo$retired[i] <- 0
+  } 
+  if (demo$employment_status[i] == "unemployed/disabled") {
+    demo$unemployed[i] <- 1
+  }
+  else {
+    demo$unemployed[i] <- 0
+  } 
+  if (demo$employment_status[i] == "NULL") {
+    demo$missing_employment[i] <- 1
+  }
+  else {
+    demo$missing_employment[i] <- 0
+  } 
+} 
+missing_empl <- demo$employment_status == "NULL"
+demo$employed[missing_empl] <- NA
+demo$retired[missing_empl] <- NA
+demo$unemployed[missing_empl] <- NA
+
+
+
+# For education, 0 = beyond high school, 1 = up to high school, 2 = 8th grade or less
+# demo$education <- as.factor(demo$education)
+levels(demo$education)
+levels(demo$education)[c(3)] <- "grade8_or_less"
+levels(demo$education)[c(2)] <- "up_to_high_school"
+levels(demo$education)[c(1)] <- "beyond_high_school"
+summary(demo$education)
+paste(round(prop.table(table(demo$education))*100,2),"%")
+demo$education <- as.character(demo$education)
+demo$beyond_high_school <- NULL
+demo$up_to_high_school <- NULL
+demo$grade8_or_less <- NULL
+demo$missing_edu <- NULL
+for (i in 1:nrow(demo)) {
+  if (demo$education[i] == "grade8_or_less") {
+    demo$grade8_or_less[i] <- 1
+  }
+  else {
+    demo$grade8_or_less[i] <- 0
+  } 
+  if (demo$education[i] == "up_to_high_school") {
+    demo$up_to_high_school[i] <- 1
+  }
+  else {
+    demo$up_to_high_school[i] <- 0
+  } 
+  if (demo$education[i] == "beyond_high_school") {
+    demo$beyond_high_school[i] <- 1
+  }
+  else {
+    demo$beyond_high_school[i] <- 0
+  }   
+  if (demo$education[i] == "NULL") {
+    demo$missing_edu[i] <- 1
+  }
+  else {
+    demo$missing_edu[i] <- 0
+  }
+}
+missing_edu <- demo$education == "NULL"
+demo$grade8_or_less[missing_edu] <- NA
+demo$up_to_high_school[missing_edu] <- NA
+demo$beyond_high_school[missing_edu] <- NA
+
+# Summarise demo
+str(demo)
+clean.demo <- select(demo, ERU_outcome, Age, Female, Married, smoker, no_English, White:missing_edu)  
+
+# Group by ERU outcome
+by_ERUoutcome <- group_by(clean.demo, ERU_outcome)
+# Useful functions: (Somehow - dplyr doesn't seem to work within functions well)
+proptest_var <- function(var){
+var_sum = paste(sum(var, na.rm = T), " (", round(mean(var, na.rm = T)*100,2), "%)", " [", round(prop.test(sum(var, na.rm = T), length(var), p = mean(var, na.rm = T), correct = T)$conf.int[1]*100, 2), "%-", round(prop.test(sum(var, na.rm = T), length(var), p = mean(var, na.rm = T), correct = T)$conf.int[2]*100, 2), "%]", sep = "")
+}
+ttest_var <- function(var){
+var_sum = paste(round(mean(var, na.rm = T),2), " [", round(t.test(var, na.rm = T)$conf.int[1], 2), "-", round(t.test(var, na.rm = T)$conf.int[2], 2), "%]", sep = "")
+}
+
+# Tables:
+
+# Demographics:
+demo.brkdown <- as.data.frame(summarise(by_ERUoutcome,
+    Age = ttest_var(Age),
+    Female= proptest_var(Female),
+    Married = proptest_var(Married),
+    Smoker = proptest_var(smoker),
+    No_English = proptest_var(no_English)
+    ))
+demo.overall <- data.frame(summarise(clean.demo,
+    ERU_outcome = "Overall",                                 
+    Age = ttest_var(Age),
+    Female= proptest_var(Female),
+    Married = proptest_var(Married),
+    Smoker = proptest_var(smoker),
+    No_English = proptest_var(no_English) 
+  ))
+Missing_demo_info <- as.data.frame(t(summarise(by_ERUoutcome,
+      Age = paste(round(length(which(is.na(Age)))/length(Age)*100, 2), "%"),
+      Gender = paste(round(length(which(is.na(Female)))/length(Female)*100, 2), "%"),
+      Marital_status = paste(round(length(which(is.na(Married)))/length(Married)*100, 2), "%"),
+      Smoking_status = paste(round(length(which(is.na(smoker)))/length(smoker)*100, 2), "%"),
+      no_English = paste(round(length(which(is.na(no_English)))/length(no_English)*100, 2), "%"),
+      Race = paste(round(length(which(is.na(White)))/length(White)*100, 2), "%"),
+      Education = paste(round(length(which(is.na(grade8_or_less)))/length(grade8_or_less)*100, 2), "%"),
+      Employment = paste(round(length(which(is.na(employed)))/length(employed)*100, 2), "%")
+)))
+
+# Race distributions:
+race.brkdown <- as.data.frame(summarise(by_ERUoutcome,
+    White = proptest_var(White),
+    Black = proptest_var(Black),
+    Hispanic = proptest_var(Hispanic),
+    Other = proptest_var(Other)
+))
+race.overall <- as.data.frame(summarise(clean.demo,
+    ERU_outcome = "Overall",                                      
+    White = proptest_var(White),
+    Black = proptest_var(Black),
+    Hispanic = proptest_var(Hispanic),
+    Other = proptest_var(Other)
+))
+#Run output with "options(dplyr.width = Inf)" to get full table
+
+# Education:
+edu.brkdown <- as.data.frame(summarise(by_ERUoutcome,
+    Grade8_or_less = proptest_var(grade8_or_less),
+    High_school = proptest_var(up_to_high_school),
+    College_plus = proptest_var(beyond_high_school)
+    ))
+edu.overall <- as.data.frame(summarise(clean.demo,
+    ERU_outcome = "Overall", 
+    Grade8_or_less = proptest_var(grade8_or_less),
+    High_school = proptest_var(up_to_high_school),
+    College_plus = proptest_var(beyond_high_school)
+    ))
+
+# Employment:
+employ.brkdown <- as.data.frame(summarise(by_ERUoutcome,
+    Employed = proptest_var(employed),
+    Retired = proptest_var(retired),
+    Unemployed = proptest_var(unemployed)
+    ))
+employ.overall <- as.data.frame(summarise(clean.demo,
+    ERU_outcome = "Overall", 
+    Employed = proptest_var(employed),
+    Retired = proptest_var(retired),
+    Unemployed = proptest_var(unemployed)
+    ))
+
+```
+
+## Demographics, education, employment split by ERU outcome
+```{r, results='markup'}
+# Age, gender, marital status, smoking status and langauge
+demographics <- data.frame(t(demo.brkdown), t(demo.overall)); demographics
+
+# Race and missing information
+Race <- data.frame(t(race.brkdown), t(race.overall)); Race
+
+# Education and missing information 
+education <- data.frame(t(edu.brkdown), t(edu.overall)); education
+
+# Employment status and missing information
+employment <- data.frame(t(employ.brkdown), t(employ.overall)); employment
+
+# Missing information
+Missing_demo_info
+
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='hide'}
+# Data cleaning
+# Funcational baseline:
+fnbase <- select(eru, ERU_outcome, blind_HOH:ASA_34)
+str(fnbase)
+
+# No missing values in blind_HOH
+which(is.na(fnbase$blind_HOH))
+
+# alone_postop has missing values
+levels(fnbase$alone_postop)
+levels(fnbase$alone_postop)[3] <- NA
+fnbase$alone_postop <- as.character(fnbase$alone_postop)
+fnbase$alone_postop <- as.integer(fnbase$alone_postop)
+
+# chronic_pain currently also a factor with "NULL" or missing values
+levels(fnbase$chronic_pain)
+levels(fnbase$chronic_pain)[3] <- NA
+fnbase$chronic_pain <- as.character(fnbase$chronic_pain)
+fnbase$chronic_pain <- as.integer(fnbase$chronic_pain)
+
+# Morse Fall risk probably should be in numeric or integer
+levels(fnbase$MorseFall_risk)
+levels(fnbase$MorseFall_risk)[17] <- NA
+levels(fnbase$MorseFall_risk)[9:16] <- 1
+levels(fnbase$MorseFall_risk)[1:8] <- 0
+fnbase$MorseFall_risk <- as.character(fnbase$MorseFall_risk)
+fnbase$MorseFall_risk <- as.integer(fnbase$MorseFall_risk)
+names(fnbase)[names(fnbase)=="MorseFall_risk"] <- "MorseFallrisk_45plus"
+
+# Same with mets score, BMI and ASA
+levels(fnbase$METS_less4)[3] <- NA
+fnbase$METS_less4 <- as.character(fnbase$METS_less4)
+fnbase$METS_less4 <- as.integer(fnbase$METS_less4)
+levels(fnbase$BMI_over30)[3] <- NA
+fnbase$BMI_over30 <- as.character(fnbase$BMI_over30)
+fnbase$BMI_over30 <- as.integer(fnbase$BMI_over30)
+levels(fnbase$ASA_34)[3] <- NA
+fnbase$ASA_34 <- as.character(fnbase$ASA_34)
+fnbase$ASA_34 <- as.integer(fnbase$ASA_34)
+
+df <- fnbase[, 2:10]
+func_baseline_overall <- do.call(data.frame, list(
+    proportion = paste(round(apply(df, 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(df, 2, length),
+    n = apply(df, 2, sum, na.rm = TRUE),
+    missing_value = apply (df, 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+
+df_ontime <- fnbase[fnbase$ERU_outcome == "On_time", 2:10]
+func_ontime <- do.call(data.frame, list(
+    proportion = paste(round(apply(df_ontime, 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(df_ontime, 2, length),
+    n = apply(df_ontime, 2, sum, na.rm = TRUE),
+    missing_value = apply (df_ontime, 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+df_late <- fnbase[fnbase$ERU_outcome == "Late", 2:10]
+func_late <- do.call(data.frame, list(
+    proportion = paste(round(apply(df_late, 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(df_late, 2, length),
+    n = apply(df_late, 2, sum, na.rm = TRUE),
+    missing_value = apply (df_late, 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+df_IP <- fnbase[fnbase$ERU_outcome == "IP", 2:10]
+func_IP <- do.call(data.frame, list(
+    proportion = paste(round(apply(df_IP, 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(df_IP, 2, length),
+    n = apply(df_IP, 2, sum, na.rm = TRUE),
+    missing_value = apply (df_IP, 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+
+```
+
+## Functional baseline split by ERU outcome
+```{r, results='markup'}
+# Overall functional baseline of all patients
+func_baseline_overall
+
+# Functional baseline of patients who went home on time
+func_ontime
+
+# Functional baseline of patients who went home late
+func_late
+
+# Functional baseline of patients who were admitted inpatient
+func_IP
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='hide'}
+# Data cleaning
+# OR related information:
+ORinfo <- select(eru, ID:ERU_outcome, service:OR_date)
+str(ORinfo)
+levels(ORinfo$payer)[14] <- "UNKNOWN"
+levels(ORinfo$payer)[10] <- "MCARE"
+levels(ORinfo$payer)[c(3, 4)] <- "BLUE CROSS"
+# Changing OR date info to day of week
+ORinfo$OR_date <- as.character(ORinfo$OR_date)
+ORinfo$OR_date <- as.Date(ORinfo$OR_date, "%m/%d/%Y")
+ORinfo$weekday <- wday(ORinfo$OR_date, label = TRUE)
+
+# Split by ERU_category
+days_ontime <- ORinfo[ORinfo$ERU_outcome == "On_time", ]
+days_late <- ORinfo[ORinfo$ERU_outcome == "Late", ]
+days_IP <- ORinfo[ORinfo$ERU_outcome == "IP", ]
+```
+
+## OR service, payer and day of week:
+```{r, results='markup'}
+# Service barplot overall
+par(las=2)
+par(mar=c(5,4,4,2))
+barplot(table(ORinfo$service), horiz = TRUE, cex.names=0.8)
+title(main = "Overrall ERU patients by service", xlab = "Number of patients")
+
+# Service barplot: Late patients
+barplot(table(days_late$service), horiz = TRUE, cex.names=0.8)
+title(main = "ERU patients discharged late - by service", xlab = "Number of patients")
+
+# Table of late and admitted patients by service
+service <- NULL
+n_total <- NULL
+n_late <- NULL
+percent_late <- NULL
+n_admitedIP <- NULL
+percent_IP <- NULL
+for(i in 1:length(levels(ORinfo$service))){
+  service[i] <- levels(ORinfo$service)[i]
+  n_total[i] <- nrow(ORinfo[ORinfo$service == levels(ORinfo$service)[i],])
+  n_late[i] <- nrow(ORinfo[ORinfo$service == levels(ORinfo$service)[i] & ORinfo$ERU_outcome == "Late",])
+  percent_late[i] <- paste(round(n_late[i]/n_total[i]*100, 0), "%")
+  n_admitedIP[i] <- nrow(ORinfo[ORinfo$service == levels(ORinfo$service)[i] & ORinfo$ERU_outcome == "IP",])
+  percent_IP[i] <- paste(round(n_admitedIP[i]/n_total[i]*100, 0), "%")
+}
+late_prop_service <- data.frame(service, n_total, n_late, percent_late, n_admitedIP, percent_IP)
+
+
+# Payer barplot overrall
+par(mar=c(5,8,4,2))
+barplot(table(ORinfo$payer), horiz = TRUE, cex.names=0.8)
+title(main = "ERU patients by payor", xlab = "Number of patients")
+
+# Payer barplot: Late patients
+barplot(table(days_late$payer), horiz = TRUE, cex.names=0.8)
+title(main = "ERU patients discharged late - by payor", xlab = "Number of patients")
+
+# Table of late and admitted patients by payer
+payer <- NULL
+n_total <- NULL
+n_late <- NULL
+percent_late <- NULL
+n_admitedIP <- NULL
+percent_IP <- NULL
+for(i in 1:length(levels(ORinfo$payer))){
+  payer[i] <- levels(ORinfo$payer)[i]
+  n_total[i] <- nrow(ORinfo[ORinfo$payer == levels(ORinfo$payer)[i],])
+  n_late[i] <- nrow(ORinfo[ORinfo$payer == levels(ORinfo$payer)[i] & ORinfo$ERU_outcome == "Late",])
+  percent_late[i] <- paste(round(n_late[i]/n_total[i]*100, 0), "%")
+  n_admitedIP[i] <- nrow(ORinfo[ORinfo$payer == levels(ORinfo$payer)[i] & ORinfo$ERU_outcome == "IP",])
+  percent_IP[i] <- paste(round(n_admitedIP[i]/n_total[i]*100, 0), "%")
+}
+late_prop_payer <- data.frame(payer, n_total, n_late, percent_late, n_admitedIP, percent_IP)
+
+par(mar = rep(3, 4))
+par(mfrow=c(3,1)) 
+# OR day of week for on time patients
+paste(round(prop.table(table(days_ontime$weekday))*100,2), "%")
+par(las=1)
+barplot(prop.table(table(days_ontime$weekday)))
+title(main = "On-time discharges")
+
+# OR day of week for late patients
+paste(round(prop.table(table(days_late$weekday))*100,2), "%")
+barplot(prop.table(table(days_late$weekday)))
+title(main = "Late discharges")
+
+# OR day of week for patients who were admitted inpatient
+paste(round(prop.table(table(days_IP$weekday))*100,2), "%")
+barplot(prop.table(table(days_IP$weekday)))
+title(main = "Admitted IP")
+
+# Table of late and admitted patients by day of week
+day_of_week <- NULL
+n_total <- NULL
+n_ontime <- NULL
+percent_ontime <- NULL
+n_late <- NULL
+percent_late <- NULL
+n_admitedIP <- NULL
+percent_IP <- NULL
+for(i in 1:length(levels(ORinfo$weekday))){
+  day_of_week[i] <- levels(ORinfo$weekday)[i]
+  n_total[i] <- nrow(ORinfo[ORinfo$weekday == levels(ORinfo$weekday)[i],])
+  n_ontime[i] <- nrow(ORinfo[ORinfo$weekday == levels(ORinfo$weekday)[i] & ORinfo$ERU_outcome == "On_time",])
+  percent_ontime[i] <- paste(round(n_ontime[i]/n_total[i]*100, 0), "%")
+  n_late[i] <- nrow(ORinfo[ORinfo$weekday == levels(ORinfo$weekday)[i] & ORinfo$ERU_outcome == "Late",])
+  percent_late[i] <- paste(round(n_late[i]/n_total[i]*100, 0), "%")
+  n_admitedIP[i] <- nrow(ORinfo[ORinfo$weekday == levels(ORinfo$weekday)[i] & ORinfo$ERU_outcome == "IP",])
+  percent_IP[i] <- paste(round(n_admitedIP[i]/n_total[i]*100, 0), "%")
+}
+prop_weekday <- data.frame(day_of_week, n_total, n_ontime, percent_ontime, n_late, percent_late, n_admitedIP, percent_IP)
+
+```
+
+# Service, payor and day of week of OR split by ERU outcomes:
+```{r, results='markup'}
+# OR service 
+arrange(late_prop_service, desc(n_total))
+
+# Payer
+arrange(late_prop_payer, desc(n_total))
+
+# Day of week of OR
+prop_weekday
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='hide'}
+# Data cleaning
+# Post-op timeline
+postop_chron <- select(eru, ID:ERU_outcome, TimeoutOR_after1800, ERU_after2100, PACU_event:MDplan_after7am)
+str(postop_chron)
+
+# Transforming datatype
+# For TimeoutOR_after1800
+levels(postop_chron$TimeoutOR_after1800)[3] <- NA
+postop_chron$TimeoutOR_after1800 <- as.character(postop_chron$TimeoutOR_after1800)
+postop_chron$TimeoutOR_after1800 <- as.integer(postop_chron$TimeoutOR_after1800)
+# For dc_edu_POD1
+levels(postop_chron$dc_edu_POD1)[c(4, 5)] <- NA
+levels(postop_chron$dc_edu_POD1)[3] <- 2
+postop_chron$dc_edu_POD1 <- as.character(postop_chron$dc_edu_POD1)
+postop_chron$dc_edu_POD1 <- as.integer(postop_chron$dc_edu_POD1)
+# For MDplan_after7am
+levels(postop_chron$MDplan_after7am)[4] <- NA
+levels(postop_chron$MDplan_after7am)[3] <- 2
+postop_chron$MDplan_after7am <- as.character(postop_chron$MDplan_after7am)
+postop_chron$MDplan_after7am <- as.integer(postop_chron$MDplan_after7am)
+
+#Subsetting data
+timing <- select(postop_chron, ERU_outcome, TimeoutOR_after1800, ERU_after2100, dc_edu_POD1, MDplan_after7am)
+
+# Splitting data by ERU outcome
+t_ontime <- timing[timing$ERU_outcome == "On_time", 2:5]
+t_late <- timing[timing$ERU_outcome == "Late", 2:5 ]
+t_IP <- timing[timing$ERU_outcome == "IP", 2:5 ]
+summary(t_ontime) # Confirmed has 1 missing values for TimeoutOR_after1800
+summary(t_late)
+summary(t_IP) # Confirmed has 1 missing values for TimeoutOR_after1800
+
+# On time:
+chron_ontime <- do.call(data.frame, list(
+    proportion = paste(round(apply(t_ontime, 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(t_ontime, 2, length),
+    n = apply(t_ontime, 2, sum, na.rm = TRUE),
+    missing_value = apply (t_ontime, 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+# Late:
+chron_late <- do.call(data.frame, list(
+    proportion = paste(round(apply(t_late, 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(t_late, 2, length),
+    n = apply(t_late, 2, sum, na.rm = TRUE),
+    missing_value = apply (t_late, 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+# Admitted IP:
+chron_IP <- do.call(data.frame, list(
+    proportion = paste(round(apply(t_IP[,1:2], 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(t_IP[,1:2], 2, length),
+    n = apply(t_IP[,1:2], 2, sum, na.rm = TRUE),
+    missing_value = apply (t_IP[,1:2], 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+
+```
+
+## Types of possibly relevant PACU and ERU events:
+```{r}
+# These events have not been tabulated yet
+
+# Types of events that happened in PACU
+levels(postop_chron$PACU_event)
+
+# TYpes of Events that happened in ERU
+levels(postop_chron$ERU_event)
+
+# Types of Multidiciplinary consults on POD1
+levels(postop_chron$MDT_consult_POD1)
+```
+
+## Post-op PACU, ERU and discharge events Timeline:
+```{r}
+# For patients who were discharged on time:
+chron_ontime
+
+# For patients who were discharged late:
+chron_late
+
+# For patients who were admitted inpatient:
+chron_IP
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='hide'}
+# Data cleaning
+# Reasons
+reasons <- select(eru, ID:ERU_outcome, Prim_reason, other_reasons, doc_ride_issue, last_minute_foley)
+# str(reasons)
+
+# Transform data type for doc_ride_issue and last_minute_foley
+levels(reasons$doc_ride_issue)[3] <- NA
+reasons$doc_ride_issue <- as.character(reasons$doc_ride_issue)
+reasons$doc_ride_issue <- as.integer(reasons$doc_ride_issue)
+levels(reasons$last_minute_foley)[3] <- NA
+reasons$last_minute_foley <- as.character(reasons$last_minute_foley)
+reasons$last_minute_foley <- as.integer(reasons$last_minute_foley)
+
+# Split by ERU outcome
+r_ontime <- reasons[reasons$ERU_outcome == "On_time",]
+r_late <- reasons[reasons$ERU_outcome == "Late",]
+r_IP <- reasons[reasons$ERU_outcome == "IP",]
+
+# On time:
+rf_ontime <- do.call(data.frame, list(
+    proportion = paste(round(apply(r_ontime[, 5:6], 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(r_ontime[, 5:6], 2, length),
+    n = apply(r_ontime[, 5:6], 2, sum, na.rm = TRUE),
+    missing_value = apply (r_ontime[, 5:6], 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+# Late:
+rf_late <- do.call(data.frame, list(
+    proportion = paste(round(apply(r_late[, 5:6], 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(r_late[, 5:6], 2, length),
+    n = apply(r_late[, 5:6], 2, sum, na.rm = TRUE),
+    missing_value = apply (r_late[, 5:6], 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+
+```
+
+## Brief glance at the various reasons for late discharges or admission:
+```{r}
+# Primary reasons late discharges or admission:
+levels(reasons$Prim_reason)
+# Other reasons late discharges or admission:
+levels(reasons$other_reasons)
+
+# Create a vector of reasons to create word cloud - giving primary reason twice the weight:
+
+words <- c(as.character(reasons$Prim_reason), as.character(reasons$Prim_reason), as.character(reasons$other_reasons))
+themes <- c("bleeding", "BSL", "cardiac_issue", "cardio_consult", "case_coordinator", "corneal_abrasion_postop", "CXR", "dc_edu", "drain", "failed_PT", "fever", "foley_edu", "hematoma", "hematuria", "hemodialysis", "interpreter", "intraop_blood_loss", "unclear", "iv_med", "lab_result", "late_TOV", "low_Ca", "lethargy", "low_UO", "MD_plan", "VNA", "PT", "SW", "med_4_itch", "med_due_8am", "migraine", "mobility", "nausea", "nerve_palsy_postop", "O2sat", "OR_postponed", "oral_intake", "pain_control", "patient_request", "perforation_postop", "refused_dc", "rehab_dc", "returned_OR", "ride_issue", "social_issue", "poor_note", "very_sedated_postop", "voiding_issue", "wound", "background_comorbidities", "BP", "JP_monitoring", "BSL", "opthal_consult", "pharm_rv")
+count <- NULL
+for (i in 1:length(themes)){
+  count[i] <- length(grep(themes[i], words))
+}
+theme_cloud <- data.frame(cbind(count, themes))
+# Export to tab delimited text file
+write.table(theme_cloud, "late_theme_cloud.txt", sep="\t", row.names=FALSE, quote=FALSE)
+```
+
+## Proportion of ride and last-minute foley issues amongst on_time and late discharges:
+```{r}
+# Ride issue is defined as documented waiting for ride as part of reason for being late - hence none of the on time patients have 'ride issue'
+# However, last minute foley is any who had a foley placed in the morning of POD1 in order to be discharged on the day
+
+# Amongst on time discharge patients
+rf_ontime
+
+# Amongst late discharge patients
+rf_late
+
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, results='hide'}
+# Data cleaning
+# ERU discharge quality indicators
+quality_dc <- select(eru, ID:ERU_outcome, last_minute_foley:patient_not_ready4dc)
+quality_dc <- filter(quality_dc, ERU_outcome != "IP")
+str(quality_dc)
+
+# On time ERU discharges
+summary(quality_dc[quality_dc$ERU_outcome == "On_time", 3:5])
+# Late ERU discharges
+summary(quality_dc[quality_dc$ERU_outcome == "Late", 3:5])
+
+# Transforming data
+levels(quality_dc$last_minute_foley)[3] <- NA
+quality_dc$last_minute_foley <- as.integer(quality_dc$last_minute_foley)
+levels(quality_dc$Re.admission.within.3.days)[c(3,4)] <- NA
+quality_dc$Re.admission.within.3.days <- as.integer(quality_dc$Re.admission.within.3.days)
+levels(quality_dc$patient_not_ready4dc)[c(3,4)] <- NA
+quality_dc$patient_not_ready4dc <- as.integer(quality_dc$patient_not_ready4dc)
+
+# Splitting by ERU outcome
+q_ontime <- quality_dc[quality_dc$ERU_outcome == "On_time",]
+q_late <- quality_dc[quality_dc$ERU_outcome == "Late",]
+
+# On time:
+Q_ontime <- do.call(data.frame, list(
+    proportion = paste(round(apply(q_ontime[, 3:5], 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(q_ontime[, 3:5], 2, length),
+    n = apply(q_ontime[, 3:5], 2, sum, na.rm = TRUE),
+    missing_value = apply (q_ontime[, 3:5], 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+# Late:
+Q_late <- do.call(data.frame, list(
+    proportion = paste(round(apply(q_late[, 3:5], 2, mean, na.rm = TRUE)*100,2), " %"),
+    n_length = apply(q_late[, 3:5], 2, length),
+    n = apply(q_late[, 3:5], 2, sum, na.rm = TRUE),
+    missing_value = apply (q_late[, 3:5], 2, 
+    function(x) sum(length(which(is.na(x))))
+                )))
+```
+
+## Indicators of likely poor ERU discharges for On-time and late discharges:
+```{r}
+# Patients admitted have been excluded
+# Discharge quality indicators are:
+# 1. Last minute foley
+# 2. Re-admission to Partner's network shown on LMR system within 3 days 
+# 3. Patient stating 'not ready' for discharge on the 2 day nursing phone follow-up questionnaire
+
+# On time discharges
+Q_ontime
+
+# Late discharges
+Q_late
+```
+
+# Urology patients analysis
+```{r}
+eru %>% group_by(service) %>% tally
+uro <- eru[eru$service == "URO", c("ERU_outcome", "Age", "Gender", "ASA_34", "service","Prim_reason", "other_reasons", "last_minute_foley")]
+
+summary(uro$ERU_outcome)
+prop.table(table(uro$ERU_outcome))
+summary(uro$Age)
+summary(uro$Gender)
+summary(uro$ASA_34)
+sort(prop.table(table(uro$Prim_reason)), decreasing = TRUE)
+sort(prop.table(table(uro$other_reasons)), decreasing = TRUE)
+foley_uro <- uro[uro$ERU_outcome != "IP", c("ERU_outcome", "last_minute_foley")]
+summary(foley_uro$last_minute_foley)
+foley_uro
+```
+
+# Gynecology patients analysis
+```{r}
+eru %>% group_by(service) %>% tally
+gyne <- eru[eru$service == "GYN", c("ERU_outcome", "Age", "Gender", "ASA_34", "service","Prim_reason", "other_reasons", "last_minute_foley")]
+
+nrow(gyne)
+summary(gyne$ERU_outcome)
+paste(round(prop.table(table(gyne$ERU_outcome))*100,2), "%")
+summary(gyne$Age)
+summary(gyne$Gender)
+summary(gyne$ASA_34)
+sort(prop.table(table(gyne$Prim_reason)), decreasing = TRUE)
+sort(prop.table(table(gyne$other_reasons)), decreasing = TRUE)
+foley_gyn <- gyne[gyne$ERU_outcome != "IP", c("ERU_outcome", "last_minute_foley")]
+summary(foley_gyn$last_minute_foley)
+foley_gyn
+```
+
+# Plastic patients analysis
+```{r}
+eru %>% group_by(service) %>% tally
+plas <- eru[eru$service == "PLA", c("ERU_outcome", "Age", "Gender", "ASA_34", "service","Prim_reason", "other_reasons", "last_minute_foley")]
+
+nrow(plas)
+summary(plas$ERU_outcome)
+paste(round(prop.table(table(plas$ERU_outcome))*100,2), "%")
+summary(plas$Age)
+summary(plas$Gender)
+summary(plas$ASA_34)
+sort(prop.table(table(plas$Prim_reason)), decreasing = TRUE)
+sort(prop.table(table(plas$other_reasons)), decreasing = TRUE)
+foley_pla <- plas[plas$ERU_outcome != "IP", c("ERU_outcome", "last_minute_foley")]
+summary(foley_pla$last_minute_foley)
+foley_pla
+```
+
+# GGI patients analysis
+```{r}
+eru %>% group_by(service) %>% tally
+ggi <- eru[eru$service == "GGI", c("ERU_outcome", "Age", "Gender", "ASA_34", "service","Prim_reason", "other_reasons", "last_minute_foley")]
+
+nrow(ggi)
+summary(ggi$ERU_outcome)
+paste(round(prop.table(table(ggi$ERU_outcome))*100,2), "%")
+summary(ggi$Age)
+summary(ggi$Gender)
+summary(ggi$ASA_34)
+sort(prop.table(table(ggi$Prim_reason)), decreasing = TRUE)
+sort(prop.table(table(ggi$other_reasons)), decreasing = TRUE)
+foley_ggi <- ggi[ggi$ERU_outcome != "IP", c("ERU_outcome", "last_minute_foley")]
+summary(foley_ggi$last_minute_foley)
+foley_ggi
+```
+
+# ANE patients analysis
+```{r}
+eru %>% group_by(service) %>% tally
+ane <- eru[eru$service == "ANE", c("ERU_outcome", "Age", "Gender", "ASA_34", "service","Prim_reason", "other_reasons", "last_minute_foley")]
+
+nrow(ane)
+summary(ane$ERU_outcome)
+paste(round(prop.table(table(ane$ERU_outcome))*100,2), "%")
+summary(ane$Age)
+summary(ane$Gender)
+summary(ane$ASA_34)
+sort(prop.table(table(ane$Prim_reason)), decreasing = TRUE)
+sort(prop.table(table(ane$other_reasons)), decreasing = TRUE)
+foley_ane <- ane[ane$ERU_outcome != "IP", c("ERU_outcome", "last_minute_foley")]
+summary(foley_ane$last_minute_foley)
+foley_ane
+```
+
+# Further work to be done include:
+1. Teasing out events in PACU and ERU
+2. Teasing out reasons for late discharge and admission
+3. Teasing out service and payor info into ERU outcome categories
+4. Co-morbidity information still needs cleaning at Excel stage
+5. Further exploratory analysis and logistical regression model fitting
+
